@@ -394,14 +394,17 @@ class VQ_CLIP_Model(nn.Module):
         features = self.vq_proj_out(features)
         return features, codes, vq_loss
 
-    def encode_image(self, image, normalize: bool=False):
+    def encode_image(self, image, normalize: bool=False, return_vq_params=False):
         features = self.visual(image)
         features, codes, vq_loss = self.quantize_features(features)
         if normalize:
             features = F.normalize(features, dim=-1)
-        return features, codes, vq_loss
 
-    def encode_text(self, text, normalize: bool=False):
+        if return_vq_params:
+            return features, codes, vq_loss
+        else: return features
+
+    def encode_text(self, text, normalize: bool=False, return_vq_params=False):
         cast_dtype = self.transformer.get_cast_dtype()
 
         x = self.token_embedding(text).to(cast_dtype)  # [batch_size, n_ctx, d_model]
@@ -419,13 +422,15 @@ class VQ_CLIP_Model(nn.Module):
         if normalize:
             x = F.normalize(x, dim=-1)
 
-        return x, codes, vq_loss
+        if return_vq_params:
+            return x, codes, vq_loss
+        else: return x
 
 
     def forward(self, image: Optional[torch.Tensor] = None,
                 text: Optional[torch.Tensor] = None,):
-        image_features, image_codes, image_vq_loss = self.encode_image(image, normalize=True) if image is not None else (None, None, None)
-        text_features, text_codes, text_vq_loss = self.encode_text(text, normalize=True) if text is not None else (None, None, None)
+        image_features, image_codes, image_vq_loss = self.encode_image(image, normalize=True, return_vq_params=True) if image is not None else (None, None, None)
+        text_features, text_codes, text_vq_loss = self.encode_text(text, normalize=True, return_vq_params=True) if text is not None else (None, None, None)
 
         vq_loss = image_vq_loss if image_vq_loss is not None else 0.
         vq_loss += text_vq_loss if text_vq_loss is not None else 0.
