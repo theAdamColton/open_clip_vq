@@ -205,6 +205,12 @@ def parse_args(args):
         help="Use a pretrained CLIP model weights with the specified tag or file path.",
     )
     parser.add_argument(
+        "--pretrained-model-name",
+        default='',
+        type=str,
+        help="Override the model name of the pretrained weights, by default this is the same as --model",
+    )
+    parser.add_argument(
         "--pretrained-image",
         default=False,
         action='store_true',

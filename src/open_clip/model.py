@@ -13,11 +13,23 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from .vq import VectorQuantize
 from .hf_model import HFTextEncoder
 from .modified_resnet import ModifiedResNet
 from .timm_model import TimmModel
 from .transformer import LayerNormFp32, LayerNorm, QuickGELU, Attention, VisionTransformer, TextTransformer
 from .utils import to_2tuple
+
+
+@dataclass
+class VQ_Cfg:
+    input_dim: int = 512 # this is the same as the output CLIP dimension
+    vq_dim: int = 1028 # The dimension of the quantized VQ layer, CLIP output will be projected up to this. If this is the same as vq_input_dim, no projection layers will be used.
+    codebook_size: int = 32
+    codebook_dim: int = 32
+    heads: int = 8 # multi headed VQ
+    sample_temp: float = 0.15 # Gumbel distribution tau parameter
+    freeze_clip: bool = True # Whether to freeze the wrapped clip model weights
 
 
 @dataclass
@@ -46,6 +58,7 @@ class CLIPVisionCfg:
     timm_drop: float = 0.  # head dropout
     timm_drop_path: Optional[float] = None  # backbone stochastic depth
 
+    vq_settings: Optional[VQ_Cfg] = None # None if there is not any VQ
 
 @dataclass
 class CLIPTextCfg:
@@ -63,6 +76,8 @@ class CLIPTextCfg:
     embed_cls: bool = False
     pad_id: int = 0
     output_tokens: bool = False
+
+    vq_settings: Optional[VQ_Cfg] = None # None if there is not any VQ
 
 
 def get_cast_dtype(precision: str):
@@ -309,6 +324,114 @@ class CustomTextCLIP(nn.Module):
                 "logit_scale": self.logit_scale.exp()
             }
         return image_features, text_features, self.logit_scale.exp()
+
+
+
+class VQ_CLIP_Model(nn.Module):
+    """
+    Wraps CLIP, patching the vq layer into the text and vision towers
+    """
+    def __init__(self, vq_config: VQ_Cfg, clip: CLIP):
+        super().__init__()
+
+        self.output_dict = clip.output_dict
+        self.visual = clip.visual
+
+        self.transformer = clip.transformer
+        self.context_length = clip.context_length
+        self.vocab_size = clip.vocab_size
+        self.token_embedding = clip.token_embedding
+        self.positional_embedding = clip.positional_embedding
+        self.ln_final = clip.ln_final
+        self.text_projection = clip.text_projection
+        self.register_buffer('attn_mask', clip.attn_mask, persistent=False)
+        self.logit_scale = clip.logit_scale
+
+        self.needs_proj_in = vq_config.vq_dim != vq_config.input_dim
+
+        if self.needs_proj_in:
+            self.vq_proj_in = nn.Sequential(
+                    # The input is expected to be raw outputs from pooling layer
+                    nn.GELU(),
+                    nn.LayerNorm(vq_config.input_dim),
+                    nn.Linear(vq_config.input_dim, vq_config.vq_dim),
+                    nn.GELU(),
+                    nn.LayerNorm(vq_config.vq_dim),
+                    )
+            self.vq_proj_out = nn.Sequential(
+                    nn.GELU(),
+                    nn.LayerNorm(vq_config.vq_dim),
+                    nn.Linear(vq_config.vq_dim, vq_config.input_dim)
+                    )
+        else:
+            self.vq_proj_in, self.vq_proj_out = nn.Identity(), nn.Identity()
+
+        self.vq = VectorQuantize(
+                dim=vq_config.vq_dim, codebook_size=vq_config.codebook_size, codebook_dim=vq_config.codebook_dim, heads=vq_config.heads, sample_codebook_temp=vq_config.sample_temp)
+
+        if vq_config.freeze_clip:
+            self.transformer.requires_grad_(False)
+            self.token_embedding.requires_grad_(False)
+            self.positional_embedding.requires_grad_(False)
+            self.ln_final.requires_grad_(False)
+            self.text_projection.requires_grad_(False)
+            self.logit_scale.requires_grad_(False)
+
+
+    def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):
+        # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
+        self.visual.lock(unlocked_groups=unlocked_groups, freeze_bn_stats=freeze_bn_stats)
+
+    @torch.jit.ignore
+    def set_grad_checkpointing(self, enable=True):
+        self.visual.set_grad_checkpointing(enable)
+        self.transformer.grad_checkpointing = enable
+
+    def quantize_features(self, features: torch.Tensor) -> torch.Tensor:
+        features = self.vq_proj_out(self.vq(self.vq_proj_in(features).unsqueeze(1))[0].squeeze(1))
+        return features
+
+
+    def encode_image(self, image, normalize: bool=False):
+        features = self.visual(image)
+        features = self.quantize_features(features)
+        if normalize:
+            features = F.normalize(features, dim=-1)
+        return features
+
+    def encode_text(self, text, normalize: bool=False):
+        cast_dtype = self.transformer.get_cast_dtype()
+
+        x = self.token_embedding(text).to(cast_dtype)  # [batch_size, n_ctx, d_model]
+
+        x = x + self.positional_embedding.to(cast_dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.transformer(x, attn_mask=self.attn_mask)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = self.ln_final(x)  # [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+
+        x = self.quantize_features(x)
+
+        if normalize:
+            x = F.normalize(x, dim=-1)
+
+        return x
+
+
+    def forward(self, image: Optional[torch.Tensor] = None,
+                text: Optional[torch.Tensor] = None,):
+        image_features = self.encode_image(image, normalize=True) if image is not None else None
+        text_features = self.encode_text(text, normalize=True) if text is not None else None
+        if self.output_dict:
+            return {
+                "image_features": image_features,
+                "text_features": text_features,
+                "logit_scale": self.logit_scale.exp()
+            }
+        return image_features, text_features, self.logit_scale.exp()
+
 
 
 def convert_weights_to_lp(model: nn.Module, dtype=torch.float16):

@@ -217,7 +217,8 @@ def main(args):
     random_seed(args.seed, 0)
     model, preprocess_train, preprocess_val = create_model_and_transforms(
         args.model,
-        args.pretrained,
+        pretrained=args.pretrained,
+        pretrained_model_name=args.pretrained_model_name,
         precision=args.precision,
         device=device,
         jit=args.torchscript,
@@ -235,7 +236,7 @@ def main(args):
         # FIXME: currenlty assumes the model your distilling from has the same tokenizer & transforms.
         dist_model, _, _ = create_model_and_transforms(
             args.distill_model, 
-            args.distill_pretrained,
+            pretrained_model_name=args.pretrained_model_name,
             device=device,
             precision=args.precision,
             output_dict=True,

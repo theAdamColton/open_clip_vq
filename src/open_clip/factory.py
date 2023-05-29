@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 
 from .constants import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
-from .model import CLIP, CustomTextCLIP, convert_weights_to_lp, convert_to_custom_text_state_dict,\
+from .model import CLIP, CustomTextCLIP, VQ_Cfg, convert_weights_to_lp, convert_to_custom_text_state_dict,\
     resize_pos_embed, get_cast_dtype
 from .coca_model import CoCa
 from .loss import ClipLoss, DistillClipLoss, CoCaLoss
@@ -19,6 +19,7 @@ from .pretrained import is_pretrained_cfg, get_pretrained_cfg, download_pretrain
     list_pretrained_tags_by_model, download_pretrained_from_hf
 from .transform import image_transform, AugmentationCfg
 from .tokenizer import HFTokenizer, tokenize
+from .model import VQ_CLIP_Model
 
 
 HF_HUB_PREFIX = 'hf-hub:'
@@ -108,6 +109,7 @@ def load_checkpoint(model, checkpoint_path, strict=True):
 def create_model(
         model_name: str,
         pretrained: Optional[str] = None,
+        pretrained_model_name: Optional[str] = None, # will default to model_name
         precision: str = 'fp32',
         device: Union[str, torch.device] = 'cpu',
         jit: bool = False,
@@ -140,16 +142,19 @@ def create_model(
     if isinstance(device, str):
         device = torch.device(device)
 
+
+    model_cfg = model_cfg or get_model_config(model_name)
+
     if pretrained and pretrained.lower() == 'openai':
-        logging.info(f'Loading pretrained {model_name} from OpenAI.')
+        model_name_to_load = pretrained_model_name if pretrained_model_name else model_name
+        logging.info(f'Loading pretrained {model_name_to_load} from OpenAI.')
         model = load_openai_model(
-            model_name,
+            model_name_to_load,
             precision=precision,
             device=device,
             cache_dir=cache_dir,
         )
     else:
-        model_cfg = model_cfg or get_model_config(model_name)
         if model_cfg is not None:
             logging.info(f'Loaded {model_name} model config.')
         else:
@@ -253,6 +258,10 @@ def create_model(
     if jit:
         model = torch.jit.script(model)
 
+    if "vq" in model_name:
+        model = VQ_CLIP_Model(VQ_Cfg(**model_cfg['vq_config']), model)
+        model = model.to(device=device)
+
     return model
 
 
@@ -290,6 +299,7 @@ def create_loss(args):
 def create_model_and_transforms(
         model_name: str,
         pretrained: Optional[str] = None,
+        pretrained_model_name: Optional[str] = None,
         precision: str = 'fp32',
         device: Union[str, torch.device] = 'cpu',
         jit: bool = False,
@@ -307,7 +317,8 @@ def create_model_and_transforms(
 ):
     model = create_model(
         model_name,
-        pretrained,
+        pretrained=pretrained,
+        pretrained_model_name=pretrained_model_name,
         precision=precision,
         device=device,
         jit=jit,
