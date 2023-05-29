@@ -25,11 +25,27 @@ from .utils import to_2tuple
 class VQ_Cfg:
     input_dim: int = 512 # this is the same as the output CLIP dimension
     vq_dim: int = 1028 # The dimension of the quantized VQ layer, CLIP output will be projected up to this. If this is the same as vq_input_dim, no projection layers will be used.
+    freeze_clip: bool = True # Whether to freeze the wrapped clip model weights
     codebook_size: int = 32
     codebook_dim: int = 32
     heads: int = 8 # multi headed VQ
     sample_temp: float = 0.15 # Gumbel distribution tau parameter
-    freeze_clip: bool = True # Whether to freeze the wrapped clip model weights
+    seperate_codebook_per_head:bool = True
+    decay:float = 0.8
+    eps:float = 1e-5
+    kmeans_init:bool = True
+    commitment_weight:float = 1.
+    straight_through:bool = True
+    reinmax:bool = True  # using reinmax for improved straight-through, assuming straight through helps at all
+    ema_update:bool = False
+    learnable_codebook:bool = True
+    affine_param:bool = True
+    affine_param_batch_decay:float = 0.99
+    affine_param_codebook_decay:float = 0.9
+    sync_update_v:float = 0.1
+
+    n_mlp_layers: int = 2
+
 
 
 @dataclass
@@ -58,8 +74,6 @@ class CLIPVisionCfg:
     timm_drop: float = 0.  # head dropout
     timm_drop_path: Optional[float] = None  # backbone stochastic depth
 
-    vq_settings: Optional[VQ_Cfg] = None # None if there is not any VQ
-
 @dataclass
 class CLIPTextCfg:
     context_length: int = 77
@@ -76,8 +90,6 @@ class CLIPTextCfg:
     embed_cls: bool = False
     pad_id: int = 0
     output_tokens: bool = False
-
-    vq_settings: Optional[VQ_Cfg] = None # None if there is not any VQ
 
 
 def get_cast_dtype(precision: str):
@@ -326,6 +338,28 @@ class CustomTextCLIP(nn.Module):
         return image_features, text_features, self.logit_scale.exp()
 
 
+class Block(nn.Module):
+    def __init__(self, in_dim, hidden_dim) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(in_dim)
+        self.mlp = MLP(in_dim, hidden_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.mlp(self.norm(x))
+        return x
+
+class MLP(nn.Module):
+    def __init__(self, in_dim, hidden_dim):
+        super().__init__()
+        self.c_fc1 = nn.Linear(in_dim, hidden_dim, bias=False)
+        self.c_fc2 = nn.Linear(in_dim, hidden_dim, bias=False)
+        self.c_proj = nn.Linear(hidden_dim, in_dim, bias=False)
+
+    def forward(self, x: torch.Tensor):
+        x = F.silu(self.c_fc1(x)) * self.c_fc2(x)
+        x = self.c_proj(x)
+        return x
+
 
 class VQ_CLIP_Model(nn.Module):
     """
@@ -352,22 +386,48 @@ class VQ_CLIP_Model(nn.Module):
         if self.needs_proj_in:
             self.vq_proj_in = nn.Sequential(
                     # The input is expected to be raw outputs from pooling layer
-                    nn.GELU(),
+                    nn.SiLU(),
                     nn.LayerNorm(vq_config.input_dim),
                     nn.Linear(vq_config.input_dim, vq_config.vq_dim),
-                    nn.GELU(),
+                    *[
+                        Block(vq_config.vq_dim, vq_config.input_dim)
+                        for _ in range(vq_config.n_mlp_layers)
+                    ],
+                    nn.SiLU(),
                     nn.LayerNorm(vq_config.vq_dim),
                     )
             self.vq_proj_out = nn.Sequential(
-                    nn.GELU(),
+                    *[
+                        Block(vq_config.vq_dim, vq_config.input_dim)
+                        for _ in range(vq_config.n_mlp_layers)
+                    ],
+                    nn.SiLU(),
                     nn.LayerNorm(vq_config.vq_dim),
-                    nn.Linear(vq_config.vq_dim, vq_config.input_dim)
-                    )
+                    nn.Linear(vq_config.vq_dim, vq_config.input_dim),
+                )
         else:
             self.vq_proj_in, self.vq_proj_out = nn.Identity(), nn.Identity()
 
         self.vq = VectorQuantize(
-                dim=vq_config.vq_dim, codebook_size=vq_config.codebook_size, codebook_dim=vq_config.codebook_dim, heads=vq_config.heads, sample_codebook_temp=vq_config.sample_temp)
+                dim=vq_config.vq_dim,
+                codebook_size=vq_config.codebook_size,
+                codebook_dim=vq_config.codebook_dim,
+                heads=vq_config.heads,
+                sample_codebook_temp=vq_config.sample_temp,
+                separate_codebook_per_head=vq_config.seperate_codebook_per_head,
+                decay=vq_config.decay,
+                eps=vq_config.eps,
+                kmeans_init=vq_config.kmeans_init,
+                commitment_weight=vq_config.commitment_weight,
+                straight_through=vq_config.straight_through,
+                reinmax=vq_config.reinmax,
+                ema_update=vq_config.ema_update,
+                learnable_codebook=vq_config.learnable_codebook,
+                affine_param=vq_config.affine_param,
+                affine_param_batch_decay=vq_config.affine_param_batch_decay,
+                affine_param_codebook_decay=vq_config.affine_param_codebook_decay,
+                sync_update_v=vq_config.sync_update_v,
+            )
 
         if vq_config.freeze_clip:
             self.transformer.requires_grad_(False)
