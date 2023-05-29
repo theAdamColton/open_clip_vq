@@ -117,7 +117,7 @@ class ClipLoss(nn.Module):
         
         return logits_per_image, logits_per_text
 
-    def forward(self, image_features, text_features, logit_scale, output_dict=False):
+    def forward(self, image_features, text_features, logit_scale, output_dict=False, **_):
         device = image_features.device
         logits_per_image, logits_per_text = self.get_logits(image_features, text_features, logit_scale)
 
@@ -214,3 +214,17 @@ class DistillClipLoss(ClipLoss):
             return {"contrastive_loss": contrastive_loss, "distill_loss": distill_loss}
 
         return contrastive_loss, distill_loss
+
+class VQ_ClipLoss(ClipLoss):
+    def __init__(self, *args, vq_loss_weight=1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vq_loss_weight = vq_loss_weight
+
+    def forward(self, *args, vq_loss=0., output_dict=False, **kwargs):
+        contrastive_loss = super().forward(*args, output_dict=False, **kwargs)
+
+        vq_loss = vq_loss * self.vq_loss_weight
+        if output_dict:
+            return {"contrastive_loss": contrastive_loss, "vq_loss": vq_loss}
+        else:
+            return contrastive_loss, vq_loss 

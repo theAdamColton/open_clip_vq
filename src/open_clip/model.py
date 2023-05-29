@@ -387,17 +387,19 @@ class VQ_CLIP_Model(nn.Module):
         self.visual.set_grad_checkpointing(enable)
         self.transformer.grad_checkpointing = enable
 
-    def quantize_features(self, features: torch.Tensor) -> torch.Tensor:
-        features = self.vq_proj_out(self.vq(self.vq_proj_in(features).unsqueeze(1))[0].squeeze(1))
-        return features
-
+    def quantize_features(self, features: torch.Tensor):
+        features, codes, vq_loss = self.vq(self.vq_proj_in(features).unsqueeze(1))
+        features = features.squeeze(1)
+        codes = codes.squeeze(1)
+        features = self.vq_proj_out(features)
+        return features, codes, vq_loss
 
     def encode_image(self, image, normalize: bool=False):
         features = self.visual(image)
-        features = self.quantize_features(features)
+        features, codes, vq_loss = self.quantize_features(features)
         if normalize:
             features = F.normalize(features, dim=-1)
-        return features
+        return features, codes, vq_loss
 
     def encode_text(self, text, normalize: bool=False):
         cast_dtype = self.transformer.get_cast_dtype()
@@ -412,23 +414,30 @@ class VQ_CLIP_Model(nn.Module):
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
 
-        x = self.quantize_features(x)
+        x, codes, vq_loss = self.quantize_features(x)
 
         if normalize:
             x = F.normalize(x, dim=-1)
 
-        return x
+        return x, codes, vq_loss
 
 
     def forward(self, image: Optional[torch.Tensor] = None,
                 text: Optional[torch.Tensor] = None,):
-        image_features = self.encode_image(image, normalize=True) if image is not None else None
-        text_features = self.encode_text(text, normalize=True) if text is not None else None
+        image_features, image_codes, image_vq_loss = self.encode_image(image, normalize=True) if image is not None else (None, None, None)
+        text_features, text_codes, text_vq_loss = self.encode_text(text, normalize=True) if text is not None else (None, None, None)
+
+        vq_loss = image_vq_loss if image_vq_loss is not None else 0.
+        vq_loss += text_vq_loss if text_vq_loss is not None else 0.
+
         if self.output_dict:
             return {
                 "image_features": image_features,
+                "image_codes": image_codes,
                 "text_features": text_features,
-                "logit_scale": self.logit_scale.exp()
+                "text_codes": text_codes,
+                "logit_scale": self.logit_scale.exp(),
+                "vq_loss": vq_loss,
             }
         return image_features, text_features, self.logit_scale.exp()
 

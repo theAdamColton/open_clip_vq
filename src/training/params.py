@@ -391,6 +391,12 @@ def parse_args(args):
         help="Log every n steps to tensorboard/console/wandb.",
     )
     parser.add_argument(
+        "--vq-loss-weight",
+        type=float,
+        default=1.0,
+        help="Commitment loss for VQ layer",
+    )
+    parser.add_argument(
         "--coca-caption-loss-weight",
         type=float,
         default=2.0,
