@@ -367,7 +367,7 @@ class VQ_CLIP_Model(nn.Module):
     """
     def __init__(self, vq_config: VQ_Cfg, clip: CLIP):
         super().__init__()
-
+        self.vq_config = vq_config
         self.output_dict = clip.output_dict
         self.visual = clip.visual
 
@@ -383,11 +383,14 @@ class VQ_CLIP_Model(nn.Module):
 
         self.needs_proj_in = vq_config.vq_dim != vq_config.input_dim
 
+        class UnitNorm(nn.Module):
+            def forward(self, x):
+                return F.normalize(x, dim=-1)
+
         if self.needs_proj_in:
             self.vq_proj_in = nn.Sequential(
                     # The input is expected to be raw outputs from pooling layer
-                    nn.SiLU(),
-                    nn.LayerNorm(vq_config.input_dim),
+                    UnitNorm(),
                     nn.Linear(vq_config.input_dim, vq_config.vq_dim),
                     *[
                         Block(vq_config.vq_dim, vq_config.input_dim)
@@ -429,14 +432,16 @@ class VQ_CLIP_Model(nn.Module):
                 sync_update_v=vq_config.sync_update_v,
             )
 
-        if vq_config.freeze_clip:
+
+    def set_grad_required(self):
+        self.requires_grad_(True)
+        if self.vq_config.freeze_clip:
             self.transformer.requires_grad_(False)
             self.token_embedding.requires_grad_(False)
             self.positional_embedding.requires_grad_(False)
             self.ln_final.requires_grad_(False)
             self.text_projection.requires_grad_(False)
             self.logit_scale.requires_grad_(False)
-
 
     def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):
         # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
@@ -464,7 +469,8 @@ class VQ_CLIP_Model(nn.Module):
             return features, codes, vq_loss
         else: return features
 
-    def encode_text(self, text, normalize: bool=False, return_vq_params=False):
+
+    def __run_text_tower(self, text):
         cast_dtype = self.transformer.get_cast_dtype()
 
         x = self.token_embedding(text).to(cast_dtype)  # [batch_size, n_ctx, d_model]
@@ -476,7 +482,11 @@ class VQ_CLIP_Model(nn.Module):
         x = self.ln_final(x)  # [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        return x
 
+
+    def encode_text(self, text, normalize: bool=False, return_vq_params=False):
+        x = self.__run_text_tower(text)
         x, codes, vq_loss = self.quantize_features(x)
 
         if normalize:
@@ -485,6 +495,16 @@ class VQ_CLIP_Model(nn.Module):
         if return_vq_params:
             return x, codes, vq_loss
         else: return x
+
+
+    def get_precodebook_features(self, image, text):
+        text = self.__run_text_tower(text)
+        text = self.vq_proj_in(text)
+
+        image = self.visual(image)
+        image = self.vq_proj_in(image)
+
+        return image, text
 
 
     def forward(self, image: Optional[torch.Tensor] = None,

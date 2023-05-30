@@ -8,6 +8,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel.distributed import DistributedDataParallel
+from open_clip.loss import VQ_ClipLoss
+
+from open_clip.model import VQ_CLIP_Model
 
 try:
     import wandb
@@ -94,6 +97,27 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
+
+
+        if type(model) is VQ_CLIP_Model and type(loss) == VQ_ClipLoss:
+            # Alternating step for codebook optimization
+            model.requires_grad_(False)
+            model.vq.codebook.requires_grad_(True)
+
+            in_feature = torch.cat(model.get_precodebook_features(images, texts), dim=0)
+            for _ in range(args.vq_commit_steps):
+                # Steps the codebook
+                *_, commit_loss = model.vq(in_feature.unsqueeze(1))
+                commit_loss = commit_loss * loss.vq_loss_weight
+
+                backward(commit_loss, scaler)
+                optimizer.zero_grad()
+
+                logging.info(f"COMMIT STEP LOSS {commit_loss}")
+
+
+            model.set_grad_required()
+                
 
         if args.accum_freq == 1:
             with autocast():
