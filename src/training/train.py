@@ -8,9 +8,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel.distributed import DistributedDataParallel
-from open_clip.loss import VQ_ClipLoss
-
-from open_clip.model import VQ_CLIP_Model
 
 try:
     import wandb
