@@ -431,11 +431,14 @@ class VQ_CLIP_Model(nn.Module):
                 sync_update_v=vq_config.sync_update_v,
             )
 
+        self.set_grad_required()
+
 
     def set_grad_required(self):
         self.requires_grad_(True)
         if self.vq_config.freeze_clip:
             self.transformer.requires_grad_(False)
+            self.visual.requires_grad_(False)
             self.token_embedding.requires_grad_(False)
             self.positional_embedding.requires_grad_(False)
             self.ln_final.requires_grad_(False)
