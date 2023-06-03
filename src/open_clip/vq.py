@@ -1,9 +1,3 @@
-"""
-Tools for learned vector quantization layer
-
-Thanks luciddrains for this code
-"""
-
 from functools import partial
 
 import torch
@@ -217,6 +211,15 @@ def batched_embedding(indices, embeds):
     embeds = repeat(embeds, 'h c d -> h b c d', b = batch)
     return embeds.gather(2, indices)
 
+# regularization losses
+
+def orthogonal_loss_fn(t):
+    # eq (2) from https://arxiv.org/abs/2112.00384
+    h, n = t.shape[:2]
+    normed_codes = l2norm(t)
+    cosine_sim = einsum('h i d, h j d -> h i j', normed_codes, normed_codes)
+    return (cosine_sim ** 2).sum() / (h * n ** 2) - (1 / n)
+
 # distance types
 
 class EuclideanCodebook(nn.Module):
@@ -411,7 +414,7 @@ class EuclideanCodebook(nn.Module):
         if self.affine_param:
             self.update_affine(flatten, self.embed)
 
-        embed = self.embed if not self.learnable_codebook else self.embed.detach()
+        embed = self.embed if self.learnable_codebook else self.embed.detach()
 
         if self.affine_param:
             codebook_std = self.codebook_variance.clamp(min = 1e-5).sqrt()
@@ -578,7 +581,7 @@ class CosineSimCodebook(nn.Module):
 
         self.init_embed_(flatten)
 
-        embed = self.embed if not self.learnable_codebook else self.embed.detach()
+        embed = self.embed if self.learnable_codebook else self.embed.detach()
 
         dist = einsum('h n d, h c d -> h n c', flatten, embed)
 
@@ -636,6 +639,9 @@ class VectorQuantize(nn.Module):
         accept_image_fmap = False,
         commitment_weight = 1.,
         commitment_use_cross_entropy_loss = False,
+        orthogonal_reg_weight = 0.,
+        orthogonal_reg_active_codes_only = False,
+        orthogonal_reg_max_codes = None,
         stochastic_sample_codes = False,
         sample_codebook_temp = 1.,
         straight_through = False,
@@ -644,6 +650,7 @@ class VectorQuantize(nn.Module):
         sync_affine_param = False,
         ema_update = True,
         learnable_codebook = False,
+        in_place_codebook_optimizer = None, # Optimizer used to update the codebook embedding if using learnable_codebook
         affine_param = False,
         affine_param_batch_decay = 0.99,
         affine_param_codebook_decay = 0.9,
@@ -665,7 +672,15 @@ class VectorQuantize(nn.Module):
         self.commitment_weight = commitment_weight
         self.commitment_use_cross_entropy_loss = commitment_use_cross_entropy_loss # whether to use cross entropy loss to codebook as commitment loss
 
+        has_codebook_orthogonal_loss = orthogonal_reg_weight > 0
+        self.has_codebook_orthogonal_loss = has_codebook_orthogonal_loss
+        self.orthogonal_reg_weight = orthogonal_reg_weight
+        self.orthogonal_reg_active_codes_only = orthogonal_reg_active_codes_only
+        self.orthogonal_reg_max_codes = orthogonal_reg_max_codes
+
         assert not (ema_update and learnable_codebook), 'learnable codebook not compatible with EMA update'
+        assert not learnable_codebook or (learnable_codebook and in_place_codebook_optimizer is not None), \
+                'Must specify an optimizer for the codebook embedding if learnable_codebook is set to True'
 
         assert 0 <= sync_update_v <= 1.
         assert not (sync_update_v > 0. and not learnable_codebook), 'learnable codebook must be turned on'
@@ -692,7 +707,7 @@ class VectorQuantize(nn.Module):
             eps = eps,
             threshold_ema_dead_code = threshold_ema_dead_code,
             use_ddp = sync_codebook,
-            learnable_codebook = learnable_codebook,
+            learnable_codebook = has_codebook_orthogonal_loss or learnable_codebook,
             sample_codebook_temp = sample_codebook_temp,
             gumbel_sample = gumbel_sample_fn,
             ema_update = ema_update
@@ -709,6 +724,9 @@ class VectorQuantize(nn.Module):
             )
 
         self._codebook = codebook_class(**codebook_kwargs)
+
+        if in_place_codebook_optimizer is not None:
+            self.in_place_codebook_optimizer = in_place_codebook_optimizer(self._codebook.parameters())
 
         self.codebook_size = codebook_size
 
@@ -757,6 +775,7 @@ class VectorQuantize(nn.Module):
         shape, device, heads, is_multiheaded, codebook_size, return_loss = x.shape, x.device, self.heads, self.heads > 1, self.codebook_size, exists(indices)
 
         need_transpose = not self.channel_last and not self.accept_image_fmap
+        should_inplace_optimize = hasattr(self, 'in_place_codebook_optimizer')
 
         # rearrange inputs
 
@@ -784,6 +803,17 @@ class VectorQuantize(nn.Module):
         # quantize
 
         quantize, embed_ind, distances = self._codebook(x, sample_codebook_temp = sample_codebook_temp)
+
+
+        if should_inplace_optimize and self.training:
+            # One step in-place update
+            ((quantize - x.detach())**2).mean().backward()
+            self.in_place_codebook_optimizer.step()
+            self.in_place_codebook_optimizer.zero_grad()
+
+            # Quantize again
+            quantize, embed_ind, distances = self._codebook(x, sample_codebook_temp = sample_codebook_temp)
+
 
         if self.training:
             quantize = x + (quantize - x).detach()
@@ -859,6 +889,25 @@ class VectorQuantize(nn.Module):
                         commit_loss = F.mse_loss(detached_quantize, x)
 
                 loss = loss + commit_loss * self.commitment_weight
+
+            if self.has_codebook_orthogonal_loss:
+                codebook = self._codebook.embed
+
+                # only calculate orthogonal loss for the activated codes for this batch
+
+                if self.orthogonal_reg_active_codes_only:
+                    assert not (is_multiheaded and self.separate_codebook_per_head), 'orthogonal regularization for only active codes not compatible with multi-headed with separate codebooks yet'
+                    unique_code_ids = torch.unique(embed_ind)
+                    codebook = codebook[:, unique_code_ids]
+
+                num_codes = codebook.shape[-2]
+
+                if exists(self.orthogonal_reg_max_codes) and num_codes > self.orthogonal_reg_max_codes:
+                    rand_ids = torch.randperm(num_codes, device = device)[:self.orthogonal_reg_max_codes]
+                    codebook = codebook[:, rand_ids]
+
+                orthogonal_reg_loss = orthogonal_loss_fn(codebook)
+                loss = loss + orthogonal_reg_loss * self.orthogonal_reg_weight
 
         # handle multi-headed quantized embeddings
 

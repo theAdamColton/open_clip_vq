@@ -15,7 +15,7 @@
     },
     "vq_config": {
 	"input_dim": 512,
-	"vq_dim": 1028,
+	"vq_dim": 512,
 	"codebook_size": 32,
 	"codebook_dim": 16,
 	"heads": 16,
@@ -30,9 +30,10 @@
 	"seperate_codebook_per_head": true,
 	"ema_update": false,
 	"learnable_codebook": true,
+	"codebook_lr": 10.0,
 	"affine_param_batch_decay": 0.99,
 	"affine_param_codebook_decay": 0.90,
-	"sync_update_v": 0.15,
+	"sync_update_v": 0.25,
 	"n_mlp_layers": 1
     }
 }

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.optim import SGD
 from torch.utils.checkpoint import checkpoint
 
 from .vq import VectorQuantize
@@ -39,6 +40,7 @@ class VQ_Cfg:
     reinmax:bool = True  # using reinmax for improved straight-through, assuming straight through helps at all
     ema_update:bool = False
     learnable_codebook:bool = True
+    codebook_lr:float = 10.0
     affine_param:bool = True
     affine_param_batch_decay:float = 0.99
     affine_param_codebook_decay:float = 0.9
@@ -381,35 +383,31 @@ class VQ_CLIP_Model(nn.Module):
         self.register_buffer('attn_mask', clip.attn_mask, persistent=False)
         self.logit_scale = clip.logit_scale
 
-        self.needs_proj_in = vq_config.vq_dim != vq_config.input_dim
 
         class UnitNorm(nn.Module):
             def forward(self, x):
                 return F.normalize(x, dim=-1)
 
-        if self.needs_proj_in:
-            self.vq_proj_in = nn.Sequential(
-                    # The input is expected to be raw outputs from pooling layer
-                    UnitNorm(),
-                    nn.Linear(vq_config.input_dim, vq_config.vq_dim),
-                    *[
-                        Block(vq_config.vq_dim, vq_config.input_dim)
-                        for _ in range(vq_config.n_mlp_layers)
-                    ],
-                    nn.SiLU(),
-                    nn.LayerNorm(vq_config.vq_dim),
-                    )
-            self.vq_proj_out = nn.Sequential(
-                    *[
-                        Block(vq_config.vq_dim, vq_config.input_dim)
-                        for _ in range(vq_config.n_mlp_layers)
-                    ],
-                    nn.SiLU(),
-                    nn.LayerNorm(vq_config.vq_dim),
-                    nn.Linear(vq_config.vq_dim, vq_config.input_dim),
+        self.vq_proj_in = nn.Sequential(
+                # The input is expected to be raw outputs from pooling layer
+                UnitNorm(),
+                nn.Linear(vq_config.input_dim, vq_config.vq_dim),
+                *[
+                    Block(vq_config.vq_dim, vq_config.input_dim)
+                    for _ in range(vq_config.n_mlp_layers)
+                ],
+                nn.SiLU(),
+                nn.LayerNorm(vq_config.vq_dim),
                 )
-        else:
-            self.vq_proj_in, self.vq_proj_out = nn.Identity(), nn.Identity()
+        self.vq_proj_out = nn.Sequential(
+                *[
+                    Block(vq_config.vq_dim, vq_config.input_dim)
+                    for _ in range(vq_config.n_mlp_layers)
+                ],
+                nn.SiLU(),
+                nn.LayerNorm(vq_config.vq_dim),
+                nn.Linear(vq_config.vq_dim, vq_config.input_dim),
+            )
 
         self.vq = VectorQuantize(
                 dim=vq_config.vq_dim,
@@ -426,6 +424,7 @@ class VQ_CLIP_Model(nn.Module):
                 reinmax=vq_config.reinmax,
                 ema_update=vq_config.ema_update,
                 learnable_codebook=vq_config.learnable_codebook,
+                in_place_codebook_optimizer=lambda *args, **kwargs: SGD(*args, **kwargs, lr=vq_config.codebook_lr),
                 affine_param=vq_config.affine_param,
                 affine_param_batch_decay=vq_config.affine_param_batch_decay,
                 affine_param_codebook_decay=vq_config.affine_param_codebook_decay,

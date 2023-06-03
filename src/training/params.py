@@ -391,14 +391,6 @@ def parse_args(args):
         help="Log every n steps to tensorboard/console/wandb.",
     )
     parser.add_argument(
-        "--vq-commit-steps",
-        type=int,
-        default=1,
-        help="Number of training iterations to optimize the codebook with \
-        respect to commit loss. Recommended is 1, but up to 4 was shown to work \
-        well in certain situations.",
-    )
-    parser.add_argument(
         "--vq-loss-weight",
         type=float,
         default=1.0,

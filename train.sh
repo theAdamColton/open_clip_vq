@@ -1,0 +1,22 @@
+python -m training.main \
+    --save-frequency 1 \
+    --zeroshot-frequency 1 \
+    --report-to tensorboard \
+    --log-every-n-steps 1 \
+    --dataset-type webdataset \
+    --train-data="/hdd/laion-400M/subset-laion400m-data/0{0000..6468}.tar"  \
+    --train-num-samples 500000 \
+    --val-data="/hdd/laion-400M/subset-laion400m-data-val/06469.tar" \
+    --imagenet-val="~/Downloads/ImageNet LSVRC 2012 Validation Set (Object Detection)/images/" \
+    --warmup 1000 \
+    --batch-size=64 \
+    --lr=6e-5 \
+    --wd=0.1 \
+    --epochs=5 \
+    --workers=8 \
+    --model ViT-B-32-vq-affine \
+    --pretrained-model-name ViT-B-32 \
+    --vq-loss-weight 1.0 \
+    --pretrained openai \
+    --precision amp  \
+    "$@"
