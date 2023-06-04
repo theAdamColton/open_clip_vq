@@ -5,18 +5,18 @@ python -m training.main \
     --log-every-n-steps 1 \
     --dataset-type webdataset \
     --train-data="/hdd/laion-400M/subset-laion400m-data/0{0000..6468}.tar"  \
-    --train-num-samples 500000 \
+    --train-num-samples 350000 \
     --val-data="/hdd/laion-400M/subset-laion400m-data-val/06469.tar" \
     --imagenet-val="~/Downloads/ImageNet LSVRC 2012 Validation Set (Object Detection)/images/" \
     --warmup 1000 \
-    --batch-size=64 \
-    --lr=6e-5 \
+    --batch-size=1024 \
+    --lr=3e-4 \
     --wd=0.1 \
-    --epochs=5 \
+    --epochs=50 \
     --workers=8 \
     --model ViT-B-32-vq-affine \
     --pretrained-model-name ViT-B-32 \
-    --vq-loss-weight 1.0 \
+    --vq-loss-weight 10.0 \
     --pretrained openai \
     --precision amp  \
     "$@"

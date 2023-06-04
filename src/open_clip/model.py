@@ -388,10 +388,12 @@ class VQ_CLIP_Model(nn.Module):
             def forward(self, x):
                 return F.normalize(x, dim=-1)
 
+        needs_proj = vq_config.input_dim != vq_config.vq_dim
+
         self.vq_proj_in = nn.Sequential(
                 # The input is expected to be raw outputs from pooling layer
                 UnitNorm(),
-                nn.Linear(vq_config.input_dim, vq_config.vq_dim),
+                nn.Linear(vq_config.input_dim, vq_config.vq_dim) if needs_proj else nn.Identity(),
                 *[
                     Block(vq_config.vq_dim, vq_config.input_dim)
                     for _ in range(vq_config.n_mlp_layers)
@@ -404,9 +406,11 @@ class VQ_CLIP_Model(nn.Module):
                     Block(vq_config.vq_dim, vq_config.input_dim)
                     for _ in range(vq_config.n_mlp_layers)
                 ],
-                nn.SiLU(),
-                nn.LayerNorm(vq_config.vq_dim),
-                nn.Linear(vq_config.vq_dim, vq_config.input_dim),
+                nn.Sequential(
+                    nn.SiLU(),
+                    nn.LayerNorm(vq_config.vq_dim),
+                    nn.Linear(vq_config.vq_dim, vq_config.input_dim),
+                ) if needs_proj else nn.Identity()
             )
 
         self.vq = VectorQuantize(
