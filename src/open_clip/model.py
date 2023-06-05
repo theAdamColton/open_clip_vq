@@ -38,15 +38,16 @@ class VQ_Cfg:
     commitment_weight:float = 1.
     straight_through:bool = True
     reinmax:bool = True  # using reinmax for improved straight-through, assuming straight through helps at all
-    ema_update:bool = False
-    learnable_codebook:bool = True
-    codebook_lr:float = 10.0
-    affine_param:bool = True
+    ema_update:bool = True
+    learnable_codebook:bool = False
+    affine_param:bool = False
     affine_param_batch_decay:float = 0.99
     affine_param_codebook_decay:float = 0.9
-    sync_update_v:float = 0.1
+    sync_update_v:float = 0.0
 
     n_mlp_layers: int = 2
+
+    quantize_text:bool=False # Also quantize text in addition to image embedding
 
 
 
@@ -388,12 +389,10 @@ class VQ_CLIP_Model(nn.Module):
             def forward(self, x):
                 return F.normalize(x, dim=-1)
 
-        needs_proj = vq_config.input_dim != vq_config.vq_dim
-
         self.vq_proj_in = nn.Sequential(
                 # The input is expected to be raw outputs from pooling layer
                 UnitNorm(),
-                nn.Linear(vq_config.input_dim, vq_config.vq_dim) if needs_proj else nn.Identity(),
+                nn.Linear(vq_config.input_dim, vq_config.vq_dim),
                 *[
                     Block(vq_config.vq_dim, vq_config.input_dim)
                     for _ in range(vq_config.n_mlp_layers)
@@ -406,11 +405,9 @@ class VQ_CLIP_Model(nn.Module):
                     Block(vq_config.vq_dim, vq_config.input_dim)
                     for _ in range(vq_config.n_mlp_layers)
                 ],
-                nn.Sequential(
-                    nn.SiLU(),
-                    nn.LayerNorm(vq_config.vq_dim),
-                    nn.Linear(vq_config.vq_dim, vq_config.input_dim),
-                ) if needs_proj else nn.Identity()
+                nn.SiLU(),
+                nn.LayerNorm(vq_config.vq_dim),
+                nn.Linear(vq_config.vq_dim, vq_config.input_dim),
             )
 
         self.vq = VectorQuantize(
@@ -428,11 +425,11 @@ class VQ_CLIP_Model(nn.Module):
                 reinmax=vq_config.reinmax,
                 ema_update=vq_config.ema_update,
                 learnable_codebook=vq_config.learnable_codebook,
-                in_place_codebook_optimizer=lambda *args, **kwargs: SGD(*args, **kwargs, lr=vq_config.codebook_lr),
                 affine_param=vq_config.affine_param,
                 affine_param_batch_decay=vq_config.affine_param_batch_decay,
                 affine_param_codebook_decay=vq_config.affine_param_codebook_decay,
                 sync_update_v=vq_config.sync_update_v,
+                threshold_ema_dead_code=2,
             )
 
         self.set_grad_required()
@@ -493,14 +490,18 @@ class VQ_CLIP_Model(nn.Module):
 
     def encode_text(self, text, normalize: bool=False, return_vq_params=False):
         x = self.__run_text_tower(text)
-        x, codes, vq_loss = self.quantize_features(x)
+
+        if self.vq_config.quantize_text:
+            x, codes, vq_loss = self.quantize_features(x)
+            if normalize:
+                x = F.normalize(x, dim=-1)
+            if return_vq_params:
+                return x, codes, vq_loss
 
         if normalize:
             x = F.normalize(x, dim=-1)
 
-        if return_vq_params:
-            return x, codes, vq_loss
-        else: return x
+        return x
 
 
     def get_precodebook_features(self, image, text):
@@ -515,21 +516,29 @@ class VQ_CLIP_Model(nn.Module):
 
     def forward(self, image: Optional[torch.Tensor] = None,
                 text: Optional[torch.Tensor] = None,):
-        image_features, image_codes, image_vq_loss = self.encode_image(image, normalize=True, return_vq_params=True) if image is not None else (None, None, None)
-        text_features, text_codes, text_vq_loss = self.encode_text(text, normalize=True, return_vq_params=True) if text is not None else (None, None, None)
+        d = {}
 
+        image_features, image_codes, image_vq_loss = self.encode_image(image, normalize=True, return_vq_params=True) if image is not None else (None, None, None)
         vq_loss = image_vq_loss if image_vq_loss is not None else 0.
-        vq_loss += text_vq_loss if text_vq_loss is not None else 0.
+        if self.vq_config.quantize_text:
+            text_features, text_codes, text_vq_loss = self.encode_text(text, normalize=True, return_vq_params=True) if text is not None else (None, None, None)
+            vq_loss += text_vq_loss if text_vq_loss is not None else 0.
+            d['text_codes'] = text_codes
+        else:
+            text_features = self.encode_text(text, normalize=True) if text is not None else None
+
+        d.update({
+            "image_features": image_features,
+            "image_codes": image_codes,
+            "text_features": text_features,
+            "logit_scale": self.logit_scale.exp(),
+            "vq_loss": vq_loss,
+        })
 
         if self.output_dict:
-            return {
-                "image_features": image_features,
-                "image_codes": image_codes,
-                "text_features": text_features,
-                "text_codes": text_codes,
-                "logit_scale": self.logit_scale.exp(),
-                "vq_loss": vq_loss,
-            }
+            return d
+
+
         return image_features, text_features, self.logit_scale.exp()
 
 

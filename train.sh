@@ -10,13 +10,13 @@ python -m training.main \
     --imagenet-val="~/Downloads/ImageNet LSVRC 2012 Validation Set (Object Detection)/images/" \
     --warmup 1000 \
     --batch-size=1024 \
-    --lr=3e-4 \
+    --lr=4e-4 \
     --wd=0.1 \
-    --epochs=50 \
+    --epochs=40 \
     --workers=8 \
     --model ViT-B-32-vq-affine \
     --pretrained-model-name ViT-B-32 \
-    --vq-loss-weight 10.0 \
+    --vq-loss-weight 5.0 \
     --pretrained openai \
     --precision amp  \
     "$@"
