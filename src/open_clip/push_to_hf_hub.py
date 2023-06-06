@@ -90,7 +90,7 @@ def push_to_hf_hub(
     token: Optional[str] = None,
     revision: Optional[str] = None,
     private: bool = False,
-    create_pr: bool = False,
+    create_pr: bool = True,
     model_card: Optional[dict] = None,
     safe_serialization: Union[bool, str] = False,
 ):
@@ -161,7 +161,7 @@ def push_pretrained_to_hf_hub(
     token: Optional[str] = None,
     revision: Optional[str] = None,
     private: bool = False,
-    create_pr: bool = False,
+    create_pr: bool = True,
     model_card: Optional[dict] = None,
 ):
     model, preprocess_eval = create_model_from_pretrained(

@@ -193,6 +193,12 @@ def create_model(
                 model = CoCa(**model_cfg, cast_dtype=cast_dtype)
             else:
                 model = CustomTextCLIP(**model_cfg, cast_dtype=cast_dtype)
+        elif "vq" in model_name:
+            vq_config = model_cfg['vq_config']
+            without_vq_config = model_cfg.copy()
+            del without_vq_config['vq_config']
+            model = CLIP(**without_vq_config, cast_dtype=cast_dtype)
+            model = VQ_CLIP_Model(VQ_Cfg(**vq_config), model)
         else:
             model = CLIP(**model_cfg, cast_dtype=cast_dtype)
 
