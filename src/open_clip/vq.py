@@ -418,7 +418,7 @@ class EuclideanCodebook(nn.Module):
 
         self.init_embed_(flatten)
 
-        if self.affine_param:
+        if self.training and self.affine_param:
             self.update_affine(flatten, self.embed)
 
         embed = self.embed if self.learnable_codebook else self.embed.detach()
