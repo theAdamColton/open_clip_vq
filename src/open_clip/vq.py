@@ -329,7 +329,7 @@ class EuclideanCodebook(nn.Module):
 
         if old_value_initted == False:
             self.register_buffer(buffer_name, new_value)
-            self.register_buffer(buffer_name + "_initted", True)
+            self.__dict__[buffer_name + "_initted"] =True
             return
 
         value = old_value * decay + new_value * (1 - decay)
