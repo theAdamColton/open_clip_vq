@@ -293,11 +293,16 @@ class EuclideanCodebook(nn.Module):
         self.affine_param_batch_decay = affine_param_batch_decay
         self.affine_param_codebook_decay = affine_param_codebook_decay
 
-        self.register_buffer('batch_mean', None)
-        self.register_buffer('batch_variance', None)
+        affine_param_size = self.num_codebooks, 1, dim
+        self.register_buffer('batch_mean', torch.zeros(affine_param_size))
+        self.batch_mean_initted = False
+        self.register_buffer('batch_variance', torch.zeros(affine_param_size))
+        self.batch_variance_initted = False
 
-        self.register_buffer('codebook_mean', None)
-        self.register_buffer('codebook_variance', None)
+        self.register_buffer('codebook_mean', torch.zeros(affine_param_size))
+        self.codebook_mean_initted = False
+        self.register_buffer('codebook_variance', torch.zeros(affine_param_size))
+        self.codebook_variance_initted = False
 
     @torch.jit.ignore
     def init_embed_(self, data):
@@ -320,9 +325,11 @@ class EuclideanCodebook(nn.Module):
     @torch.jit.ignore
     def update_with_decay(self, buffer_name, new_value, decay):
         old_value = getattr(self, buffer_name)
+        old_value_initted = getattr(self, buffer_name+"_initted")
 
-        if not exists(old_value):
+        if old_value_initted == False:
             self.register_buffer(buffer_name, new_value)
+            self.register_buffer(buffer_name + "_initted", True)
             return
 
         value = old_value * decay + new_value * (1 - decay)
