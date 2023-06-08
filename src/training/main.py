@@ -334,7 +334,9 @@ def main(args):
             sd = checkpoint["state_dict"]
             if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
                 sd = {k[len('module.'):]: v for k, v in sd.items()}
-            model.load_state_dict(sd)
+            res = model.load_state_dict(sd, strict=False)
+            print("RESULT OF LOADING SD", res)
+            print("MAKE SURE THESE SD LOADING ERRORS ARE FINE")
             if optimizer is not None:
                 optimizer.load_state_dict(checkpoint["optimizer"])
             if scaler is not None and 'scaler' in checkpoint:

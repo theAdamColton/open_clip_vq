@@ -264,7 +264,7 @@ def create_model(
     if jit:
         model = torch.jit.script(model)
 
-    if "vq" in model_name:
+    if "vq" in model_name and type(model) != VQ_CLIP_Model:
         model = VQ_CLIP_Model(VQ_Cfg(**model_cfg['vq_config']), model)
         model = model.to(device=device)
 
